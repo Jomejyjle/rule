@@ -1,19 +1,10 @@
 /**
- * 日期：2026-04-21 优化版（原作者 @Key）
- * 支持 SubStore 所有平台（Surge/Loon/Shadowrocket/Stash/QX/Egern/ClashMeta/sing-box 等）
- * 原脚本仅支持 Surge/Loon，现已使用 targetPlatform 全面兼容
- * 
- * 用法（Sub-Store 脚本操作里添加）：
- * https://raw.githubusercontent.com/Jomejyjle/rule/refs/heads/main/pname.js#timeout=1000&bs=30
- * 
- * 参数：
- * timeout=  超时时间（毫秒，默认 2000）
- * bs=       批处理节点数（默认 20，建议 20-50）
- * flag      加国旗
- * px        根据 Cloudflare 延时排序（从低到高）
- * debug     开启调试日志
- * 
- * 功能：使用 Cloudflare trace 测活 → 去除无效/重复节点 → 可选加旗/排序
+ * 日期：2026-04-21 最终修复版（原作者 @Key）
+ * 修复：$substore.env → $.env（避免加载时报错）
+ * 支持 SubStore 所有平台（推荐 Loon/Surge 使用效果最佳）
+ * 用法：
+ * https://raw.githubusercontent.com/Jomejyjle/rule/refs/heads/main/pname2.js#bs=30&timeout=1000
+ * 参数：bs=批处理数（建议20-50）、timeout=超时(ms)、flag=加国旗、px=按延迟排序、debug=调试日志
  */
 
 const $ = $substore;
@@ -25,7 +16,8 @@ let timeout = iar.timeout || 2000,
     Sort = iar.px,
     bs = iar.bs || 20;
 
-const { isLoon, isSurge } = $substore.env;
+// 正确获取平台信息
+const { isLoon, isSurge } = $.env || {};
 
 async function operator(e = [], targetPlatform, env) {
     let tzname = "", subcoll = "", x = false, xy = false;
@@ -33,7 +25,7 @@ async function operator(e = [], targetPlatform, env) {
     if (env?.source?._collection?.name) xy = true;
     if (x && xy) {
         tzname = env.source._collection.name + ": [" + env.source._collection.subscriptions + "]";
-        subcoll = "组合订阅内单条订阅加了脚本, 输出组合订阅";
+        subcoll = "组合订阅内单条订阅加了脚本";
     } else if (x) {
         tzname = env.source[e[0].subName].name;
         subcoll = "单条订阅脚本";
@@ -44,7 +36,7 @@ async function operator(e = [], targetPlatform, env) {
 
     const startTime = new Date();
 
-    // 使用 targetPlatform 兼容所有 SubStore 平台
+    // 使用 targetPlatform 优先兼容所有平台
     let target = targetPlatform;
     if (!target) {
         target = isLoon ? "Loon" : isSurge ? "Surge" : undefined;
@@ -52,7 +44,6 @@ async function operator(e = [], targetPlatform, env) {
 
     if (!target) {
         $.notify("PNAME", "不支持的平台", `当前平台: ${targetPlatform || "未知"}，跳过处理`);
-        $.error(`PNAME: 不支持的平台 ${targetPlatform || "未知"}`);
         return e;
     }
 
@@ -66,8 +57,7 @@ async function operator(e = [], targetPlatform, env) {
     }
 
     const ein = e.length;
-    klog(`开始处理节点: ${ein} 个`);
-    klog(`批处理节点数: ${bs} 个`);
+    klog(`开始处理 ${ein} 个节点，批处理数: ${bs}`);
 
     let i = 0, newnode = [];
     while (i < e.length) {
@@ -90,17 +80,15 @@ async function operator(e = [], targetPlatform, env) {
     }
 
     e = removels(e);
-
     let eout = e.length;
 
-    // Surge 专属检测：是否使用了带 ability=http-client-policy 的 SubStore
     if (eout > 2 && isSurge) {
-        const allsame = newnode.every((value, index, arr) => value === arr[0]);
+        const allsame = newnode.every((v, i, arr) => v === arr[0]);
         if (allsame) {
             klog(`未使用带指定节点功能的 SubStore`);
             $notification.post(
-                'PNAME：点击以安装对应版本' + subcoll + tzname,
-                '未使用带指定节点功能的 SubStore，或所有节点落地IP相同',
+                'PNAME：点击安装对应版本' + subcoll + tzname,
+                '未使用 ability=http-client-policy 或所有节点IP相同',
                 '',
                 { url: "https://raw.githubusercontent.com/sub-store-org/Sub-Store/master/config/Surge-ability.sgmodule" }
             );
@@ -108,26 +96,21 @@ async function operator(e = [], targetPlatform, env) {
         }
     }
 
-    if (Sort) {
-        e.sort((a, b) => a.Key.tk - b.Key.tk);
-    }
+    if (Sort) e.sort((a, b) => a.Key.tk - b.Key.tk);
 
     const endTime = new Date();
-    const timeDiff = endTime.getTime() - startTime.getTime();
-    klog(`处理完后剩余: ${eout} 个`);
-    klog(`此方法总用时: ${zhTime(timeDiff)}`);
+    klog(`处理完成，剩余 ${eout} 个节点，总耗时 ${zhTime(endTime.getTime() - startTime.getTime())}`);
 
     return e;
 }
 
+// 以下函数保持不变（getflag、sleep、OUTIA、removels、zhTime 等）
 function getflag(e) {
     const t = e.toUpperCase().split("").map((e) => 127397 + e.charCodeAt());
     return String.fromCodePoint(...t).replace(/🇹🇼/g, "🇨🇳");
 }
 
-function sleep(e) {
-    return new Promise((t) => setTimeout(t, e));
-}
+function sleep(e) { return new Promise(t => setTimeout(t, e)); }
 
 let apiRead = 0, apiw = 0;
 async function OUTIA(e) {
@@ -136,20 +119,18 @@ async function OUTIA(e) {
 
     const getHttp = async (reTry) => {
         try {
-            let r = ProxyUtils.produce([e], target);  // 使用适配后的 target
+            let r = ProxyUtils.produce([e], target);
             let time = Date.now();
             const response = await Promise.race([
                 $.http.get({ url: url, node: r, "policy-descriptor": r }),
-                new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error("timeout")), timeout)
-                ),
+                new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), timeout))
             ]);
             const data = response.body;
             if (data && data.length > 0) {
                 let endtime = Date.now() - time;
                 let lines = data.split("\n");
                 let key = lines.reduce((acc, line) => {
-                    const [name, value] = line.split("=").map((item) => item.trim());
+                    const [name, value] = line.split("=").map(item => item.trim());
                     if (["ip", "loc", "warp"].includes(name)) {
                         acc[name] = value;
                         acc["tk"] = endtime;
@@ -172,12 +153,7 @@ async function OUTIA(e) {
     };
 
     return new Promise((resolve, reject) => {
-        getHttp(1)
-            .then((data) => {
-                apiw++;
-                resolve(data);
-            })
-            .catch(reject);
+        getHttp(1).then(data => { apiw++; resolve(data); }).catch(reject);
     });
 }
 
@@ -186,9 +162,7 @@ function getRandom() {
 }
 
 function delog(...arg) {
-    if (debug) {
-        console.log("[PNAME] " + arg);
-    }
+    if (debug) console.log("[PNAME] " + arg);
 }
 
 function removels(e) {
@@ -205,13 +179,8 @@ function removels(e) {
 
 function zhTime(e) {
     e = e.toString().replace(/-/g, "");
-    if (e < 1000) {
-        return `${Math.round(e)}毫秒`;
-    } else if (e < 60000) {
-        return `${Math.round(e / 1000)}秒`;
-    } else if (e < 3600000) {
-        return `${Math.round(e / 60000)}分钟`;
-    } else {
-        return `${Math.round(e / 3600000)}小时`;
-    }
+    if (e < 1000) return `${Math.round(e)}毫秒`;
+    else if (e < 60000) return `${Math.round(e / 1000)}秒`;
+    else if (e < 3600000) return `${Math.round(e / 60000)}分钟`;
+    else return `${Math.round(e / 3600000)}小时`;
 }
