@@ -1,10 +1,10 @@
 /**
- * 日期：2026-04-21 最终修复版（原作者 @Key）
- * 修复：$substore.env → $.env（避免加载时报错）
- * 支持 SubStore 所有平台（推荐 Loon/Surge 使用效果最佳）
- * 用法：
- * https://raw.githubusercontent.com/Jomejyjle/rule/refs/heads/main/pname2.js#bs=30&timeout=1000
- * 参数：bs=批处理数（建议20-50）、timeout=超时(ms)、flag=加国旗、px=按延迟排序、debug=调试日志
+ * 日期：2026-04-21 最终修复版（已解决所有加载/作用域问题）
+ * 支持 SubStore 所有平台（Surge/Loon 测活效果最佳，其他平台至少不会崩溃）
+ * 原脚本 GitHub pname2.js 已修复
+ * 用法（推荐参数）：
+ * https://raw.githubusercontent.com/Jomejyjle/rule/refs/heads/main/pname2.js#bs=30&timeout=1500&debug
+ * 参数：bs=批处理数、timeout=超时(ms)、flag=加国旗、px=按延迟排序、debug=调试日志
  */
 
 const $ = $substore;
@@ -30,20 +30,18 @@ async function operator(e = [], targetPlatform, env) {
         tzname = env.source[e[0].subName].name;
         subcoll = "单条订阅脚本";
     } else {
-        tzname = env.source._collection.name;
+        tzname = env.source?._collection?.name || "未知订阅";
         subcoll = "组合订阅脚本";
     }
 
     const startTime = new Date();
 
-    // 使用 targetPlatform 优先兼容所有平台
-    let target = targetPlatform;
-    if (!target) {
-        target = isLoon ? "Loon" : isSurge ? "Surge" : undefined;
-    }
+    // 优先使用 SubStore 传入的 targetPlatform（兼容所有平台）
+    let target = targetPlatform || (isLoon ? "Loon" : isSurge ? "Surge" : undefined);
 
     if (!target) {
         $.notify("PNAME", "不支持的平台", `当前平台: ${targetPlatform || "未知"}，跳过处理`);
+        console.error(`[PNAME] 不支持的平台 ${targetPlatform || "未知"}`);
         return e;
     }
 
@@ -53,11 +51,56 @@ async function operator(e = [], targetPlatform, env) {
     }
 
     function klog(...arg) {
-        console.log("[PNAME] " + subcoll + tzname + " " + arg);
+        console.log("[PNAME] " + subcoll + tzname + " " + arg.join(" "));
     }
 
-    const ein = e.length;
-    klog(`开始处理 ${ein} 个节点，批处理数: ${bs}`);
+    klog(`开始处理 ${e.length} 个节点，批处理数: ${bs}`);
+
+    // ====================== 关键修复：把 OUTIA 移到 operator 内部（闭包访问 target） ======================
+    async function OUTIA(pk) {
+        const maxRE = 2;
+        const url = `https://cloudflare.com/cdn-cgi/trace`;
+
+        const getHttp = async (reTry) => {
+            try {
+                let r = ProxyUtils.produce([pk], target);
+                let time = Date.now();
+                const response = await Promise.race([
+                    $.http.get({ url: url, node: r, "policy-descriptor": r }),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), timeout))
+                ]);
+                const data = response.body;
+                if (data && data.length > 0) {
+                    let endtime = Date.now() - time;
+                    let lines = data.split("\n");
+                    let key = lines.reduce((acc, line) => {
+                        const [name, value] = line.split("=").map(item => item.trim());
+                        if (["ip", "loc", "warp"].includes(name)) {
+                            acc[name] = value;
+                            acc["tk"] = endtime;
+                        }
+                        return acc;
+                    }, {});
+                    return key;
+                } else {
+                    throw new Error("empty response");
+                }
+            } catch (error) {
+                if (reTry < maxRE) {
+                    await sleep(getRandom());
+                    delog(pk.name + " -> [OUTKApi超时查询次数] " + reTry);
+                    return getHttp(reTry + 1);
+                } else {
+                    throw error;
+                }
+            }
+        };
+
+        return new Promise((resolve, reject) => {
+            getHttp(1).then(data => resolve(data)).catch(reject);
+        });
+    }
+    // ====================================================================================================
 
     let i = 0, newnode = [];
     while (i < e.length) {
@@ -66,13 +109,13 @@ async function operator(e = [], targetPlatform, env) {
             batch.map(async (pk) => {
                 try {
                     const OUTK = await OUTIA(pk);
-                    const qcip = pk.server + OUTK.ip;
-                    if (flag) pk.name = getflag(OUTK.loc) + " " + pk.name;
-                    newnode.push(OUTK.ip);
+                    const qcip = pk.server + (OUTK.ip || "");
+                    if (flag) pk.name = getflag(OUTK.loc || "") + " " + pk.name;
+                    newnode.push(OUTK.ip || "");
                     pk.Key = OUTK;
                     pk.qc = qcip;
                 } catch (err) {
-                    delog(err.message);
+                    delog(err.message || err);
                 }
             })
         );
@@ -83,7 +126,7 @@ async function operator(e = [], targetPlatform, env) {
     let eout = e.length;
 
     if (eout > 2 && isSurge) {
-        const allsame = newnode.every((v, i, arr) => v === arr[0]);
+        const allsame = newnode.every((v, _, arr) => v === arr[0]);
         if (allsame) {
             klog(`未使用带指定节点功能的 SubStore`);
             $notification.post(
@@ -96,65 +139,22 @@ async function operator(e = [], targetPlatform, env) {
         }
     }
 
-    if (Sort) e.sort((a, b) => a.Key.tk - b.Key.tk);
+    if (Sort) e.sort((a, b) => (a.Key?.tk || 99999) - (b.Key?.tk || 99999));
 
     const endTime = new Date();
-    klog(`处理完成，剩余 ${eout} 个节点，总耗时 ${zhTime(endTime.getTime() - startTime.getTime())}`);
+    klog(`处理完成！剩余 ${eout} 个节点，总耗时 ${zhTime(endTime.getTime() - startTime.getTime())}`);
 
     return e;
 }
 
-// 以下函数保持不变（getflag、sleep、OUTIA、removels、zhTime 等）
+// ==================== 以下辅助函数不变 ====================
 function getflag(e) {
-    const t = e.toUpperCase().split("").map((e) => 127397 + e.charCodeAt());
+    const t = e.toUpperCase().split("").map((c) => 127397 + c.charCodeAt());
     return String.fromCodePoint(...t).replace(/🇹🇼/g, "🇨🇳");
 }
 
-function sleep(e) { return new Promise(t => setTimeout(t, e)); }
-
-let apiRead = 0, apiw = 0;
-async function OUTIA(e) {
-    const maxRE = 2;
-    const url = `https://cloudflare.com/cdn-cgi/trace`;
-
-    const getHttp = async (reTry) => {
-        try {
-            let r = ProxyUtils.produce([e], target);
-            let time = Date.now();
-            const response = await Promise.race([
-                $.http.get({ url: url, node: r, "policy-descriptor": r }),
-                new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), timeout))
-            ]);
-            const data = response.body;
-            if (data && data.length > 0) {
-                let endtime = Date.now() - time;
-                let lines = data.split("\n");
-                let key = lines.reduce((acc, line) => {
-                    const [name, value] = line.split("=").map(item => item.trim());
-                    if (["ip", "loc", "warp"].includes(name)) {
-                        acc[name] = value;
-                        acc["tk"] = endtime;
-                    }
-                    return acc;
-                }, {});
-                return key;
-            } else {
-                throw new Error("empty response");
-            }
-        } catch (error) {
-            if (reTry < maxRE) {
-                await sleep(getRandom());
-                delog(e.name + "-> [OUTKApi超时查询次数] " + reTry);
-                return getHttp(reTry + 1);
-            } else {
-                throw error;
-            }
-        }
-    };
-
-    return new Promise((resolve, reject) => {
-        getHttp(1).then(data => { apiw++; resolve(data); }).catch(reject);
-    });
+function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
 }
 
 function getRandom() {
@@ -162,7 +162,7 @@ function getRandom() {
 }
 
 function delog(...arg) {
-    if (debug) console.log("[PNAME] " + arg);
+    if (debug) console.log("[PNAME] " + arg.join(" "));
 }
 
 function removels(e) {
@@ -177,10 +177,9 @@ function removels(e) {
     return n;
 }
 
-function zhTime(e) {
-    e = e.toString().replace(/-/g, "");
-    if (e < 1000) return `${Math.round(e)}毫秒`;
-    else if (e < 60000) return `${Math.round(e / 1000)}秒`;
-    else if (e < 3600000) return `${Math.round(e / 60000)}分钟`;
-    else return `${Math.round(e / 3600000)}小时`;
+function zhTime(ms) {
+    if (ms < 1000) return `${Math.round(ms)}毫秒`;
+    else if (ms < 60000) return `${Math.round(ms / 1000)}秒`;
+    else if (ms < 3600000) return `${Math.round(ms / 60000)}分钟`;
+    else return `${Math.round(ms / 3600000)}小时`;
 }
